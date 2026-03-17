@@ -41,9 +41,9 @@ gdf = gdf.to_crs(epsg)
 #step 4: write the LANL treelist input file
 #==============
 af.writeFuellist(pf, name+'_treelist.txt', nx, ny, ht, dx, ndatax, ndatay)
-
+"""
 #==============
-#step 5: run LANL trees; Pedro this part will definitely require some fancy footwork
+#step 5: run LANL trees; 
 #==============
 exe_path = './Inputs/trees.exe'   # or wherever trees.exe actually is
 
@@ -80,3 +80,4 @@ size_s = 2/size_s #transform SAV to sizescale
 size_c[:,:,0] = size_s
 af.writefiles(size_c,os.path.join(pf,'treesss.dat'))
 
+"""

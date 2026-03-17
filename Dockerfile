@@ -33,8 +33,11 @@ RUN pip install --no-cache-dir \
     scipy
 
 RUN cp /tmp/Trees/build/trees.exe /home/jovyan/work/trees.exe && \
-    chown ${NB_UID}:${NB_GID} /home/jovyan/work/trees.exe && \
-    rm -rf /tmp/Trees
+    rm -rf /tmp/Trees && \
+    chown -R ${NB_UID}:${NB_GID} /home/jovyan/work && \
+    find /home/jovyan/work -type d -exec chmod 775 {} \; && \
+    find /home/jovyan/work -type f -exec chmod 664 {} \; && \
+    chmod 755 /home/jovyan/work/trees.exe
 
 USER ${NB_UID}
 WORKDIR /home/jovyan/work

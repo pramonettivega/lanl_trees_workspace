@@ -52,29 +52,42 @@ def reprojectRaster(src_path, target_epsg, out_path):
         # Optional: return pixel size and total size in metres
         x_res = transform[0]      # pixel width (metres)
         y_res = -transform[4]     # pixel height (metres, positive)
-        width_m = width * x_res
-        height_m = height * y_res
-        return x_res, y_res, width_m, height_m
+        return x_res, y_res, width, height
 
-def writeTreelist(pf, name, epsg):
+def writeTreelist(pf, name, epsg, build):
     #read treelist grojson
     df = gpd.read_file(os.path.join(pf,name+'_Treelist.geojson')) #read the tree list geojson
     df = df.set_crs(4326) #set epsg to unprojected lat/lon)
     df = df.to_crs(epsg) #change epsg to projected lat/lon THIS HAS TO BE IN METERS!!!
+    df['X'] = df.geometry.x        # now X is in the target CRS (metres)
+    df['Y'] = df.geometry.y 
+    print(df['X'])
+
+    #mask out buildings (again.....)
+    pts_in_buildings = gpd.sjoin(df, build, how='inner', predicate='within')
+    df = df.drop(index=pts_in_buildings.index)
+
+    #save the treelist geojson
+    df.to_file(os.path.join(pf,name+'_Treelist_'+str(epsg)+'.geojson'),
+               driver='GeoJSON')
 
     #save the treelist
-    fname = os.path.join(pf,name) #open a new file to write the treelist in .txt format for LANL trees
+    fname = os.path.join(pf,name+'_treelist.txt') #open a new file to write the treelist in .txt format for LANL trees
+    print(fname)
     if os.path.exists(fname):
         os.remove(fname)
     file = open(fname, 'w')
 
     df['xcoor'] = df['X'] - df['X'].min() #change the coordinates from projected to absolute coordinates
     df['ycoor'] = df['Y'] - df['Y'].min() #change the coordinates from projected to absolute coordinates
+    print('extents x!',df['xcoor'].min(), df['xcoor'].max())
+    print('extents y!',df['ycoor'].min(), df['ycoor'].max())
+
 
     for j in range(len(df)):
         sp    = 1#spcd_dict[str(df['SPCD'].iloc[j])][0] #species number
-        xcoor = int(df['xcoor'].iloc[j]) #location coordinates
-        ycoor = int(df['ycoor'].iloc[j]) #location coordinates
+        xcoor = np.round(df['xcoor'].iloc[j], 3) #location coordinates
+        ycoor = np.round(df['ycoor'].iloc[j], 3) #location coordinates
         ht    = np.round(df['HT'].iloc[j],2) #height [m]
         htlc  = np.round(df['CBH'].iloc[j],2) #height to live crown [m]
         cd    = np.round(df['DIA'].iloc[j],2) #max canopy diameter [m]
@@ -94,12 +107,12 @@ def writeTreelist(pf, name, epsg):
 
 def writeFuellist(pf, treefile, nx, ny, nz, dx, ndatax, ndatay, dz='1.0', aa1='1.0'):
     #just make sure they're strings....
+    ndatax = str(nx*dx)#str(int(ndatax)) 
+    ndatay = str(ny*dx)#str(int(ndatay))
     nx = str(int(nx)) 
     ny = str(int(ny)) 
     nz = str(int(nz)) 
     dx = str(dx) 
-    ndatax = str(int(ndatax)) 
-    ndatay = str(int(ndatay))
     dz = str(dz)
     aa1 = str(aa1)
     #this will inherently run lanl trees with NO surface fuels
@@ -200,6 +213,7 @@ def GetArrayData(datfile, nfuel, Nx, Ny, Nz):
 def GetTifData(src_path):
     with rasterio.open(src_path) as src:
         data = src.read(1)
+        data = data.T
     return data
 
 

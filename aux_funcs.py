@@ -4,85 +4,133 @@ import pandas as pd
 import os
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.transform import Affine
 import math
 from pathlib import Path
 import numpy as np
 import json
 from shapely.geometry import box, mapping
 from scipy.io import FortranFile
+import sys
+import matplotlib.pyplot as plt
 
 
-def reprojectRaster(src_path, target_epsg, out_path):
-    # Open source raster (expects EPSG:4326)
+def reproject_to_match(src_path, ref_path, out_path,
+                       resampling=Resampling.nearest):
+    with rasterio.open(ref_path) as ref:
+        dst_crs       = ref.crs
+        dst_transform = ref.transform
+        dst_width     = ref.width      # = nx
+        dst_height    = ref.height     # = ny
+        dst_meta      = ref.meta.copy()
+
     with rasterio.open(src_path) as src:
-        print(f"Source CRS: {src.crs}")
-
-        # Target CRS
-        target_crs = f"EPSG:{target_epsg}"
-        print(f"Chosen target CRS: {target_crs}")
-
-        # Compute transform, dimensions for target CRS
-        transform, width, height = calculate_default_transform(
-            src.crs, target_crs, src.width, src.height, *src.bounds
-        )
-        print(f"Target width/height: {width} x {height}")
-
-        # Prepare metadata for output file
-        kwargs = src.meta.copy()
-        kwargs.update({
-            "crs": target_crs,
-            "transform": transform,
-            "width": width,
-            "height": height
+        dst_meta.update({
+            "crs"       : dst_crs,
+            "transform" : dst_transform,
+            "width"     : dst_width,
+            "height"    : dst_height
         })
 
-        # Reproject each band and write to out_path
-        with rasterio.open(out_path, "w", **kwargs) as dst:
+        # Create the destination file and reproject band‑by‑band
+        with rasterio.open(out_path, "w", **dst_meta) as dst:
             for i in range(1, src.count + 1):
                 reproject(
                     source=rasterio.band(src, i),
                     destination=rasterio.band(dst, i),
                     src_transform=src.transform,
                     src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs=target_crs,
-                    resampling=Resampling.nearest
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=resampling,
                 )
+    return int(dst_width), int(dst_height)
 
-        # Optional: return pixel size and total size in metres
-        x_res = transform[0]      # pixel width (metres)
-        y_res = -transform[4]     # pixel height (metres, positive)
-        return x_res, y_res, width, height
+def reprojectRaster(src_path, target_epsg, out_path):
+    # Open source raster
+    with rasterio.open(src_path) as src:
+        print(f"Source CRS: {src.crs}")
+        # ---------------------------------------------------------
+        # 2️⃣  Target CRS (make sure it is a proper string)
+        # ---------------------------------------------------------
+        dst_crs = f"EPSG:{int(target_epsg)}"
+        print(f"Chosen target CRS: {dst_crs}")
 
-def writeTreelist(pf, name, epsg, build):
+        # ---------------------------------------------------------
+        # 3️⃣  Compute the *correct* north‑up transform, width & height
+        # ---------------------------------------------------------
+        # This already gives a transform with b = d = 0 and e negative.
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds
+        )
+        print(f"Target width/height: {width} x {height}")
+
+        # ---------------------------------------------------------
+        # 4️⃣  Extract pixel size (always positive numbers)
+        # ---------------------------------------------------------
+        x_res = transform.a               # pixel width  (metres)
+        y_res = -transform.e              # pixel height (positive metres)
+
+        if x_res == 0 or y_res == 0:
+            raise ValueError("Zero pixel size detected – aborting.")
+
+        # ---------------------------------------------------------
+        # 5️⃣  Compute the bounds in the target CRS (xmin, ymin, xmax, ymax)
+        # ---------------------------------------------------------
+        left   = transform.c
+        top    = transform.f
+        right  = left + width * x_res
+        bottom = top  - height * y_res
+        bounds_target = (left, bottom, right, top)
+        print(f"Target bounds (xmin, ymin, xmax, ymax): {bounds_target}")
+
+        # ---------------------------------------------------------
+        # 6️⃣  Prepare destination metadata – **use the original transform**
+        # ---------------------------------------------------------
+        dst_meta = src.meta.copy()
+        dst_meta.update({
+            "crs": dst_crs,
+            "transform": transform,          # <-- keep the transform returned above
+            "width": width,
+            "height": height,
+            # Preserve NoData if the source raster has one
+            "nodata": src.nodata,
+        })
+
+        # ---------------------------------------------------------
+        # 7️⃣  Write the re‑projected raster band‑by‑band
+        # ---------------------------------------------------------
+        with rasterio.open(out_path, "w", **dst_meta) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,   # <-- same transform we used for metadata
+                    dst_crs=dst_crs,
+                    resampling=Resampling.nearest,
+                )            
+    
+        return x_res, y_res, width, height, (transform.c, transform.f - height * y_res, transform.c + width * x_res, transform.f)
+    
+
+def writeTreelist(pf, name, epsg, bounds):
     #read treelist grojson
-    df = gpd.read_file(os.path.join(pf,name+'_Treelist.geojson')) #read the tree list geojson
-    df = df.set_crs(4326) #set epsg to unprojected lat/lon)
-    df = df.to_crs(epsg) #change epsg to projected lat/lon THIS HAS TO BE IN METERS!!!
-    df['X'] = df.geometry.x        # now X is in the target CRS (metres)
-    df['Y'] = df.geometry.y 
-    print(df['X'])
-
-    #mask out buildings (again.....)
-    pts_in_buildings = gpd.sjoin(df, build, how='inner', predicate='within')
-    df = df.drop(index=pts_in_buildings.index)
-
-    #save the treelist geojson
-    df.to_file(os.path.join(pf,name+'_Treelist_'+str(epsg)+'.geojson'),
-               driver='GeoJSON')
+    df = gpd.read_file(os.path.join(pf,name+'_Treelist_'+epsg+'.geojson')) #read the tree list geojson
 
     #save the treelist
-    fname = os.path.join(pf,name+'_treelist.txt') #open a new file to write the treelist in .txt format for LANL trees
+    fname = os.path.join(pf,name+'_treelist_'+str(epsg)+'.txt') #open a new file to write the treelist in .txt format for LANL trees
     print(fname)
     if os.path.exists(fname):
         os.remove(fname)
     file = open(fname, 'w')
 
-    df['xcoor'] = df['X'] - df['X'].min() #change the coordinates from projected to absolute coordinates
-    df['ycoor'] = df['Y'] - df['Y'].min() #change the coordinates from projected to absolute coordinates
+
+    df['xcoor'] = df['X'] - bounds[0] #change the coordinates from projected to absolute coordinates
+    df['ycoor'] = df['Y'] - bounds[1] #change the coordinates from projected to absolute coordinates
     print('extents x!',df['xcoor'].min(), df['xcoor'].max())
     print('extents y!',df['ycoor'].min(), df['ycoor'].max())
-
 
     for j in range(len(df)):
         sp    = 1#spcd_dict[str(df['SPCD'].iloc[j])][0] #species number
@@ -212,9 +260,138 @@ def GetArrayData(datfile, nfuel, Nx, Ny, Nz):
 
 def GetTifData(src_path):
     with rasterio.open(src_path) as src:
-        data = src.read(1)
-        data = data.T
-    return data
+        # -------------------------------------------------------------
+        # 1️⃣  Read the raw band
+        # -------------------------------------------------------------
+        data = src.read(1)                     # shape = (rows, cols)
+
+        # -------------------------------------------------------------
+        # 2️⃣  If the raster is already north‑up, just return it
+        # -------------------------------------------------------------
+        if src.transform.b == 0 and src.transform.d == 0:
+            return data
+
+        # -------------------------------------------------------------
+        # 3️⃣  Extract the six affine coefficients safely
+        # -------------------------------------------------------------
+        # Option 1 – using the built‑in helper (works on all recent rasterio):
+        a, b, c, d, e, f = src.transform.to_gdal()
+        # (You could also do:
+        # a, b, c, d, e, f = (src.transform.a, src.transform.b,
+        #                     src.transform.c, src.transform.d,
+        #                     src.transform.e, src.transform.f)
+        # )  
+
+        pixel_width  = a                # metres per column (east‑west)
+        pixel_height = -e               # positive metres per row (north‑south)
+
+        # -------------------------------------------------------------
+        # 4️⃣  Compute the bounds of the original raster
+        # -------------------------------------------------------------
+        left, bottom, right, top = src.bounds
+
+        # -------------------------------------------------------------
+        # 5️⃣  Build a new north‑up affine (no rotation/shear)
+        # -------------------------------------------------------------
+        new_transform = Affine(pixel_width, 0, left,
+                               0, -pixel_height, top)
+
+        # Destination array – keep original dimensions
+        dst = np.empty((src.height, src.width), dtype=data.dtype)
+
+        # -------------------------------------------------------------
+        # 6️⃣  Reproject onto the north‑up grid
+        # -------------------------------------------------------------
+        reproject(
+            source=data,
+            destination=dst,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=new_transform,
+            dst_crs=src.crs,                 # only orientation changes
+            resampling=Resampling.nearest,   # change if you need smoother resampling
+        )
+
+        # -------------------------------------------------------------
+        # 7️⃣  Return the north‑up array
+        # -------------------------------------------------------------
+        return dst
+
+def filterTreelist(trees:gpd.GeoDataFrame, 
+                   buildings:gpd.GeoDataFrame, 
+                   roads:gpd.GeoDataFrame, 
+                   epsg:str, 
+                   out_path:str, 
+                   name:str):
+    # Exclusion Parameters
+    ROAD_BUFFER = 5.0           # Road buffer in meters
+    BUILDING_BUFFER = 5.0        # Building buffer in meters
+    out_file = os.path.join(out_path,name+'_Treelist.geojson')
+    # -------------------
+    print(f"Cleaning existing treelist")
+    print(f"Exclusion Parameters: Road Buffer={ROAD_BUFFER}m, Building Buffer={BUILDING_BUFFER}m")
+    
+    print(f"Reprojecting to {epsg}...")
+    trees = trees.to_crs(int(epsg))
+    trees['X'] = trees.geometry.x.round(2)
+    trees['Y'] = trees.geometry.y.round(2)
+    buildings = buildings.to_crs(epsg)
+    roads = roads.to_crs(epsg)
+
+    # 2. Create Exclusion Mask
+    print("Creating exclusion corridors...")
+    
+    # Buffer roads
+    roads_mask = roads.buffer(ROAD_BUFFER).to_frame(name='geometry')
+    # Buffer buildings
+    buildings_mask = buildings.buffer(BUILDING_BUFFER).to_frame(name='geometry')
+    
+    # Combine masks for spatial join
+    # We use a combined GeoDataFrame of all exclusion areas
+    exclusion_gdf = pd.concat([roads_mask, buildings_mask], ignore_index=True)
+    # Dissolve to speed up join
+    exclusion_mask_single = exclusion_gdf.union_all()
+    exclusion_mask_gdf = gpd.GeoDataFrame({'geometry': [exclusion_mask_single]}, crs=epsg)
+
+    # 3. Filter Trees
+    print("Identifying trees in restricted zones (buildings/roads)...")
+    # Spatial join: find trees that intersect the exclusion mask
+    joined = gpd.sjoin(trees, exclusion_mask_gdf, how='left', predicate='intersects')
+    
+    # Keep only trees that did NOT intersect (index_right will be NaN)
+    trees_clean = joined[joined['index_right'].isna()].copy()
+    
+    # Clean up sjoin columns
+    if 'index_right' in trees_clean.columns:
+        trees_clean = trees_clean.drop(columns=['index_right'])
+
+    # 4. Finalize and Save
+    print(f"Original trees: {len(trees)}")
+    print(f"Trees removed:  {len(trees) - len(trees_clean)}")
+    print(f"Trees remaining: {len(trees_clean)}")
+    print(f"Saving ...")
+    trees_clean.to_file(os.path.join(out_path,name+'_Treelist_'+str(epsg)+'.geojson'), driver='GeoJSON')
+
+    # Reproject back to original CRS (EPSG:4326)
+    print("Reprojecting to EPSG:4326...")
+    trees_clean = trees_clean.to_crs('EPSG:4326')
+    
+    # Update X/Y columns to match geometry (6 decimal precision)
+    if 'X' in trees_clean.columns and 'Y' in trees_clean.columns:
+        trees_clean['X'] = trees_clean.geometry.x.round(6)
+        trees_clean['Y'] = trees_clean.geometry.y.round(6)
+        trees_clean['geometry'] = gpd.points_from_xy(trees_clean['X'], trees_clean['Y'])
+
+    print(f"Saving ...")
+    trees_clean.to_file(out_file, driver='GeoJSON')
+    print("Done.")
+
+
+
+
+
+
+
 
 
 

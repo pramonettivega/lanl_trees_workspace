@@ -1,3 +1,9 @@
+"""
+Version date: April 6th, 2026
+Authors: Julia Oliveto (LANL)
+LA-UR-26-22170
+"""
+
 import os
 import geopandas as gpd
 import aux_funcs as af

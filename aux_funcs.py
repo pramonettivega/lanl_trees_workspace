@@ -1,3 +1,9 @@
+"""
+Version date: April 6th, 2026
+Authors: Julia Oliveto (LANL)
+LA-UR-26-22170
+"""
+
 import numpy as np
 import geopandas as gpd
 import pandas as pd
